@@ -216,10 +216,10 @@
         dest: /mnt/root/etc/netplan/01-dhcp.yaml
         content: |
           network:
-          version: 2
-          ethernets:
-            enp0s1:
-              dhcp4: true
+            version: 2
+            ethernets:
+              enp1s0:
+                dhcp4: true
 
     - name: Unmount virtual filesystems and cleanup
       ignore_errors: yes
