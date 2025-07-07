@@ -1,0 +1,203 @@
+- name: Build Ubuntu 22.04 image with LUKS, LVM, keyfile and TPM Clevis firstboot setup
+  hosts: localhost
+  become: true
+  vars:
+    image_file: /tmp/ubuntu.img
+    image_size: 6G
+    loop_device: /dev/loop20
+    keyfile_path: /root/crypt.key
+    mount_root: /mnt/root
+    ubuntu_release: jammy
+    mirror_url: http://archive.ubuntu.com/ubuntu
+
+  tasks:
+    - name: Create image file
+      command: qemu-img create {{ image_file }} {{ image_size }}
+      args:
+        creates: "{{ image_file }}"
+
+    - name: Associate loop device
+      command: losetup -P {{ loop_device }} {{ image_file }}
+
+    - name: Create GPT partition table
+      command: parted -s {{ loop_device }} mklabel gpt
+
+    - name: Create BIOS boot partition (1MiB - 2MiB)
+      command: parted -s {{ loop_device }} mkpart primary 1MiB 2MiB
+
+    - name: Set bios_grub flag on first partition
+      command: parted -s {{ loop_device }} set 1 bios_grub on
+
+    - name: Create /boot partition (2MiB - 1026MiB)
+      command: parted -s {{ loop_device }} mkpart primary ext4 2MiB 1026MiB
+
+    - name: Create root partition (1026MiB - 100%)
+      command: parted -s {{ loop_device }} mkpart primary 1026MiB 100%
+
+    - name: Wait for partitions to appear
+      command: udevadm settle
+
+    - name: Format /boot partition
+      command: mkfs.ext4 {{ loop_device }}p2
+
+    - name: Create keyfile directory
+      file:
+        path: files
+        state: directory
+
+    - name: Generate crypt keyfile
+      command: dd if=/dev/urandom of=files/crypt.key bs=4096 count=1
+      args:
+        creates: files/crypt.key
+
+    - name: Set permissions on keyfile
+      file:
+        path: files/crypt.key
+        mode: '0400'
+
+    - name: Copy keyfile to root
+      copy:
+        src: files/crypt.key
+        dest: "{{ keyfile_path }}"
+        mode: '0400'
+
+    - name: Format root partition with LUKS using keyfile
+      command: cryptsetup luksFormat {{ loop_device }}p3 {{ keyfile_path }} --batch-mode
+
+    - name: Open LUKS partition
+      command: cryptsetup open {{ loop_device }}p3 cryptroot --key-file {{ keyfile_path }}
+
+    - name: Create physical volume on cryptroot
+      command: pvcreate /dev/mapper/cryptroot
+
+    - name: Create volume group vg0
+      command: vgcreate vg0 /dev/mapper/cryptroot
+
+    - name: Create logical volume root (2G)
+      command: lvcreate -L 4G -n root vg0
+
+    - name: Create logical volume swap (1G)
+      command: lvcreate -L 500M -n swap vg0
+
+    - name: Format root LV
+      command: mkfs.ext4 /dev/vg0/root
+
+    - name: Format swap LV
+      command: mkswap /dev/vg0/swap
+
+    - name: Mount root LV
+      command: mount /dev/vg0/root {{ mount_root }}
+
+    - name: Mount /boot
+      command: >
+        bash -c "mkdir -p {{ mount_root }}/boot &&
+                 mount {{ loop_device }}p2 {{ mount_root }}/boot"
+
+
+
+    - name: Bootstrap Ubuntu base system with kernel, grub, cryptsetup, lvm2, clevis and tpm2-tools
+      command: >
+        debootstrap
+        --components=main,universe
+        --include=linux-image-generic,grub-pc,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools 
+        {{ ubuntu_release }} {{ mount_root }} {{ mirror_url }}
+
+
+    - name: Mount virtual filesystems for chroot
+      block:
+        - command: mount --bind /dev {{ mount_root }}/dev
+        - command: mount --bind /proc {{ mount_root }}/proc
+        - command: mount --bind /sys {{ mount_root }}/sys
+
+
+    - name: Copy keyfile into image root
+      copy:
+        src: files/crypt.key
+        dest: "{{ mount_root }}/root/crypt.key"
+        mode: '0400'
+
+    - name: Configure /etc/crypttab with keyfile
+      copy:
+        dest: "{{ mount_root }}/etc/crypttab"
+        content: |
+          cryptroot UUID={{ lookup('pipe', 'blkid -s UUID -o value ' + loop_device + 'p3') }} /root/crypt.key luks
+
+    - name: Configure /etc/fstab
+      copy:
+        dest: "{{ mount_root }}/etc/fstab"
+        content: |
+          /dev/mapper/vg0-root / ext4 defaults 0 1
+          /dev/mapper/vg0-swap none swap sw 0 0
+          {{ loop_device }}p2 /boot ext4 defaults 0 2
+
+
+
+    - name: Setup grub and update initramfs in chroot
+      shell: |
+        chroot {{ mount_root }} /bin/bash -c "echo 'root:root' | chpasswd && \
+          echo 'GRUB_ENABLE_CRYPTODISK=y' >> /etc/default/grub && \
+          echo 'KEYFILE_PATTERN=/root/crypt.key' > /etc/cryptsetup-initramfs/conf-hook
+          update-initramfs -u && \
+          grub-install --target=i386-pc --boot-directory=/boot {{ loop_device }} && \
+          update-grub"
+
+
+
+
+
+    - name: Copy TPM binding script for first boot
+      copy:
+        dest: "{{ mount_root }}/root/setup-clevis-tpm.sh"
+        mode: '0750'
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+          DEVICE="/dev/disk/by-uuid/$(blkid -s UUID -o value /dev/mapper/cryptroot)"
+          KEYFILE="/root/crypt.key"
+          if [ ! -e /dev/tpmrm0 ]; then
+            echo "❌ TPM2 device not found."
+            exit 1
+          fi
+          echo "🔐 Binding $DEVICE to TPM2 via Clevis..."
+          cryptsetup open "$DEVICE" cryptsetup-tmp --key-file "$KEYFILE"
+          echo yes | clevis luks bind -f -d "$DEVICE" tpm2 '{}'
+          cryptsetup close cryptsetup-tmp
+          echo "✅ Clevis TPM binding complete."
+          rm -f /root/setup-clevis-tpm.sh
+
+    - name: Install systemd service to run clevis TPM setup script once
+      copy:
+        dest: "{{ mount_root }}/etc/systemd/system/clevis-tpm-setup.service"
+        content: |
+          [Unit]
+          Description=Bind root device to TPM2 via clevis
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/root/setup-clevis-tpm.sh
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+
+
+    - name: Enable clevis TPM setup systemd service
+      shell: chroot {{ mount_root }} systemctl enable clevis-tpm-setup.service
+
+
+
+        #    - name: Unmount virtual filesystems and cleanup
+        #ignore_errors: yes
+        #block:
+        #- shell: |
+        #   swapoff /dev/vg0/swap || true
+        #   umount {{ mount_root }}/dev || true
+        #   umount {{ mount_root }}/proc || true
+        #   umount {{ mount_root }}/sys || true
+        #   umount {{ mount_root }}/boot || true
+        #   umount {{ mount_root }} || true
+        #- command: vgchange -an
+        #- command: cryptsetup close cryptroot
+        #- command: losetup -d {{ loop_device }}
+
