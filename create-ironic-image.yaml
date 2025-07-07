@@ -99,7 +99,7 @@
       command: >
         debootstrap
         --components=main,universe
-        --include=linux-image-generic,grub-pc,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools 
+        --include=linux-image-generic,grub-pc,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion 
         {{ ubuntu_release }} {{ mount_root }} {{ mirror_url }}
 
 
@@ -138,7 +138,29 @@
           /dev/mapper/vg0-swap none swap sw 0 0
           UUID={{ boot_uuid.stdout }} /boot ext4 defaults 0 2
 
+    - name: Set German keyboard layout in /etc/default/keyboard inside chroot
+      copy:
+        dest: "{{ mount_root }}/etc/default/keyboard"
+        content: |
+          XKBMODEL="pc105"
+          XKBLAYOUT="de"
+          XKBVARIANT=""
+          XKBOPTIONS=""
+          BACKSPACE="guess"
 
+    - name: Ensure keyboard-configuration is set for reconfigure
+      copy:
+        dest: "{{ mount_root }}/etc/default/console-setup"
+        content: |
+          ACTIVE_CONSOLES="/dev/tty[1-6]"
+          CHARMAP="UTF-8"
+          CODESET="Lat15"
+          FONTFACE="Fixed"
+          FONTSIZE="8x16"
+
+    - name: Run dpkg-reconfigure keyboard-configuration in chroot (optional, may need binfmt support)
+      command: chroot {{ mount_root }} dpkg-reconfigure -f noninteractive keyboard-configuration
+      ignore_errors: true  # Optional, since this may fail in minimal chroot
 
     - name: Setup grub and update initramfs in chroot
       shell: |
@@ -149,10 +171,6 @@
           grub-install --target=i386-pc --boot-directory=/boot {{ loop_device }} && \
           update-grub"
 
-
-
-
-
     - name: Copy TPM binding script for first boot
       copy:
         dest: "{{ mount_root }}/root/setup-clevis-tpm.sh"
@@ -160,18 +178,18 @@
         content: |
           #!/bin/bash
           set -euo pipefail
-          DEVICE="/dev/disk/by-uuid/$(blkid -s UUID -o value /dev/mapper/cryptroot)"
           KEYFILE="/root/crypt.key"
           if [ ! -e /dev/tpmrm0 ]; then
-            echo "❌ TPM2 device not found."
+            echo "TPM2 device not found."
             exit 1
           fi
-          echo "🔐 Binding $DEVICE to TPM2 via Clevis..."
-          cryptsetup open "$DEVICE" cryptsetup-tmp --key-file "$KEYFILE"
-          echo yes | clevis luks bind -f -d "$DEVICE" tpm2 '{}'
-          cryptsetup close cryptsetup-tmp
-          echo "✅ Clevis TPM binding complete."
+          echo "Binding "{{ crypto_uuid.stdout }}" to TPM2 via Clevis..."
+          clevis-luks-bind -f -d /dev/disk/by-uuid/"{{ crypto_uuid.stdout }}" -k $KEYFILE tpm2 '{}'
+          echo "Clevis TPM binding complete."
           rm -f /root/setup-clevis-tpm.sh
+          rm -f $KEYFILE
+          sed -i s*\/root\/crypt.key*none*g /etc/crypttab
+          update-initramfs -k all -u    
 
     - name: Install systemd service to run clevis TPM setup script once
       copy:
@@ -193,19 +211,28 @@
     - name: Enable clevis TPM setup systemd service
       shell: chroot {{ mount_root }} systemctl enable clevis-tpm-setup.service
 
-
+    - name: Setze Netplan-Konfiguration für DHCP auf eth0
+      copy:
+        dest: /mnt/root/etc/netplan/01-dhcp.yaml
+        content: |
+          network:
+          version: 2
+          ethernets:
+            enp0s1:
+              dhcp4: true
 
     - name: Unmount virtual filesystems and cleanup
       ignore_errors: yes
       block:
         - shell: |
-          swapoff /dev/vg0/swap || true
-          umount {{ mount_root }}/dev || true
-          umount {{ mount_root }}/proc || true
-          umount {{ mount_root }}/sys || true
-          umount {{ mount_root }}/boot || true
-          umount {{ mount_root }} || true
+            swapoff /dev/vg0/swap || true
+            umount {{ mount_root }}/dev || true
+            umount {{ mount_root }}/proc || true
+            umount {{ mount_root }}/sys || true
+            umount {{ mount_root }}/boot || true
+            umount {{ mount_root }} || true
         - command: vgchange -an
         - command: cryptsetup close cryptroot
         - command: losetup -d {{ loop_device }}
+
 
