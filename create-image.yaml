@@ -116,11 +116,19 @@
         dest: "{{ mount_root }}/root/crypt.key"
         mode: '0400'
 
+    - name: Get UUID of crypto partition
+      command: blkid -s UUID -o value {{ loop_device }}p3
+      register: crypto_uuid
+
     - name: Configure /etc/crypttab with keyfile
       copy:
         dest: "{{ mount_root }}/etc/crypttab"
         content: |
-          cryptroot UUID={{ lookup('pipe', 'blkid -s UUID -o value ' + loop_device + 'p3') }} /root/crypt.key luks
+          cryptroot UUID={{ crypto_uuid.stdout }} /root/crypt.key luks
+
+    - name: Get UUID of boot partition
+      command: blkid -s UUID -o value {{ loop_device }}p2
+      register: boot_uuid
 
     - name: Configure /etc/fstab
       copy:
@@ -128,7 +136,7 @@
         content: |
           /dev/mapper/vg0-root / ext4 defaults 0 1
           /dev/mapper/vg0-swap none swap sw 0 0
-          {{ loop_device }}p2 /boot ext4 defaults 0 2
+          UUID={{ boot_uuid.stdout }} /boot ext4 defaults 0 2
 
 
 
@@ -187,17 +195,17 @@
 
 
 
-        #    - name: Unmount virtual filesystems and cleanup
-        #ignore_errors: yes
-        #block:
-        #- shell: |
-        #   swapoff /dev/vg0/swap || true
-        #   umount {{ mount_root }}/dev || true
-        #   umount {{ mount_root }}/proc || true
-        #   umount {{ mount_root }}/sys || true
-        #   umount {{ mount_root }}/boot || true
-        #   umount {{ mount_root }} || true
-        #- command: vgchange -an
-        #- command: cryptsetup close cryptroot
-        #- command: losetup -d {{ loop_device }}
+    - name: Unmount virtual filesystems and cleanup
+      ignore_errors: yes
+      block:
+        - shell: |
+          swapoff /dev/vg0/swap || true
+          umount {{ mount_root }}/dev || true
+          umount {{ mount_root }}/proc || true
+          umount {{ mount_root }}/sys || true
+          umount {{ mount_root }}/boot || true
+          umount {{ mount_root }} || true
+        - command: vgchange -an
+        - command: cryptsetup close cryptroot
+        - command: losetup -d {{ loop_device }}
 
