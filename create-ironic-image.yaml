@@ -3,12 +3,24 @@
   become: true
   vars:
     image_file: /tmp/ubuntu.img
-    image_size: 10G
+    image_size: 12G
     loop_device: /dev/loop20
     keyfile_path: /root/crypt.key
     mount_root: /mnt/root
     ubuntu_release: jammy
     mirror_url: http://archive.ubuntu.com/ubuntu
+    logical_volumes:
+      - { name: "root",    size: 4G }
+      - { name: "home",    size: 500M }
+      - { name: "var",     size: 500M }
+      - { name: "tmp",     size: 500M }
+      - { name: "docker",  size: 100M }
+      - { name: "log",     size: 100M }
+      - { name: "audit",   size: 100M }
+      - { name: "ceph",    size: 100M }
+      - { name: "kolla",   size: 100M }
+      - { name: "mariadb", size: 100M }
+      - { name: "swap",    size: 500M }
 
   tasks:
     - name: Create image file
@@ -77,23 +89,23 @@
     - name: Create physical volume on cryptroot
       command: pvcreate /dev/mapper/cryptroot
 
-    - name: Create volume group vg0
-      command: vgcreate vg0 /dev/mapper/cryptroot
+    - name: Create volume group system
+      command: vgcreate system /dev/mapper/cryptroot
 
-    - name: Create logical volume root (2G)
-      command: lvcreate -L 4G -n root vg0
+    - name: Create all logical volumes
+      comman: lvcreate -L {{ item.size }} -n {{ item.name }} system
+      loop: "{{ logical_volumes }}"
 
-    - name: Create logical volume swap (1G)
-      command: lvcreate -L 500M -n swap vg0
-
-    - name: Format root LV
-      command: mkfs.ext4 /dev/vg0/root
+    - name: Format all LVs
+      command: mkfs.ext4 /dev/system/{{ itme.name }}
+      loop: "{{ logical_volumes }}"
+      when: item.name != "swap"
 
     - name: Format swap LV
-      command: mkswap /dev/vg0/swap
-
+      command: mkswap /dev/system/swap
+  
     - name: Mount root LV
-      command: mount /dev/vg0/root {{ mount_root }}
+      command: mount /dev/system/root {{ mount_root }}
 
     - name: Mount /boot
       command: >
@@ -146,8 +158,8 @@
       copy:
         dest: "{{ mount_root }}/etc/fstab"
         content: |
-          /dev/mapper/vg0-root / ext4 defaults 0 1
-          /dev/mapper/vg0-swap none swap sw 0 0
+          /dev/mapper/system-root / ext4 defaults 0 1
+          /dev/mapper/system-swap none swap sw 0 0
           UUID={{ boot_uuid.stdout }} /boot ext4 defaults 0 2
           UUID={{ efi_uuid.stdout }} /boot/efi vfat defaults 0 2
 
@@ -240,7 +252,7 @@
       ignore_errors: yes
       block:
         - shell: |
-            swapoff /dev/vg0/swap || true
+            swapoff /dev/system/swap || true
             umount {{ mount_root }}/dev || true
             umount {{ mount_root }}/proc || true
             umount {{ mount_root }}/sys || true
