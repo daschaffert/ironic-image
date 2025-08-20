@@ -10,10 +10,10 @@
     ubuntu_release: jammy
     mirror_url: http://archive.ubuntu.com/ubuntu
     logical_volumes:
-      - { name: "root",    size: 4G }
-      - { name: "home",    size: 500M }
-      - { name: "var",     size: 500M }
-      - { name: "tmp",     size: 500M }
+      - { name: "root",    size: 3G }
+      - { name: "home",    size: 100M }
+      - { name: "var",     size: 600M }
+      - { name: "tmp",     size: 100M }
       - { name: "docker",  size: 100M }
       - { name: "log",     size: 100M }
       - { name: "audit",   size: 100M }
@@ -21,6 +21,10 @@
       - { name: "kolla",   size: 100M }
       - { name: "mariadb", size: 100M }
       - { name: "swap",    size: 500M }
+    myhostname: ubuntu1
+    autologin_consoles:
+      - getty@tty1
+      - serial-getty@ttyS0
 
   tasks:
     - name: Create image file
@@ -40,7 +44,6 @@
     - name: Set bios_grub flag on first partition
       command: parted -s {{ loop_device }} set 1 bios_grub on
 
-    
     - name: Create /boot/efi partition (2MiB - 512MiB)
       command: parted -s {{ loop_device }} mkpart esp fat32 2MiB 512MiB
 
@@ -93,11 +96,11 @@
       command: vgcreate system /dev/mapper/cryptroot
 
     - name: Create all logical volumes
-      comman: lvcreate -L {{ item.size }} -n {{ item.name }} system
+      command: lvcreate -L {{ item.size }} -n {{ item.name }} system
       loop: "{{ logical_volumes }}"
 
     - name: Format all LVs
-      command: mkfs.ext4 /dev/system/{{ itme.name }}
+      command: mkfs.ext4 -L {{ item.name }} /dev/system/{{ item.name }}
       loop: "{{ logical_volumes }}"
       when: item.name != "swap"
 
@@ -119,16 +122,14 @@
       command: >
         debootstrap
         --components=main,universe
-        --include=linux-image-generic,grub-pc,grub-efi-amd64,shim-signed,grub-efi-amd64-signed,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion 
+        --include=linux-image-generic,grub-pc,grub-efi-amd64,shim-signed,grub-efi-amd64-signed,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd
         {{ ubuntu_release }} {{ mount_root }} {{ mirror_url }}
-
 
     - name: Mount virtual filesystems for chroot
       block:
         - command: mount --bind /dev {{ mount_root }}/dev
         - command: mount --bind /proc {{ mount_root }}/proc
         - command: mount --bind /sys {{ mount_root }}/sys
-
 
     - name: Copy keyfile into image root
       copy:
@@ -183,9 +184,46 @@
           FONTFACE="Fixed"
           FONTSIZE="8x16"
 
+    - name: Set hostname in /etc/hostname
+      copy:
+        dest: "{{ mount_root }}/etc/hostname"
+        content: "{{ myhostname }}\n"
+
+    - name: Configure /etc/hosts
+      copy:
+        dest: "{{ mount_root }}/etc/hosts"
+        content: |
+          127.0.0.1   localhost
+          127.0.1.1   {{ myhostname }}
+
+          # IPv6 defaults
+          ::1     localhost ip6-localhost ip6-loopback
+          ff02::1 ip6-allnodes
+          ff02::2 ip6-allrouters
+
+    - name: Create systemd override directories for autologin
+      file:
+        path: "{{ mount_root }}/etc/systemd/system/{{ item }}.service.d"
+        state: directory
+        mode: '0755'
+      loop: "{{ autologin_consoles }}"
+
+    - name: Enable root autologin on consoles
+      copy:
+        dest: "{{ mount_root }}/etc/systemd/system/{{ item }}.service.d/override.conf"
+        content: |
+          [Service]
+          ExecStart=
+          {% if item == "getty@tty1" %}
+          ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+          {% else %}
+          ExecStart=-/sbin/agetty --autologin root --keep-baud 115200,38400,9600 %I $TERM
+          {% endif %}
+      loop: "{{ autologin_consoles }}"
+
     - name: Run dpkg-reconfigure keyboard-configuration in chroot (optional, may need binfmt support)
       command: chroot {{ mount_root }} dpkg-reconfigure -f noninteractive keyboard-configuration
-      ignore_errors: true  # Optional, since this may fail in minimal chroot
+      ignore_errors: true
 
     - name: Setup grub and update initramfs in chroot
       shell: |
