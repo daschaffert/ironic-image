@@ -49,10 +49,10 @@
       command: parted -s {{ loop_device }} mkpart esp fat32 2MiB 512MiB
 
     - name: Create /boot partition (512MiB - 1536MiB)
-      command: parted -s {{ loop_device }} mkpart primary ext4 512MiB 1026MiB
+      command: parted -s {{ loop_device }} mkpart primary ext4 512MiB 1536MiB
 
     - name: Create root partition (1536MiB - 100%)
-      command: parted -s {{ loop_device }} mkpart primary 1026MiB 100%
+      command: parted -s {{ loop_device }} mkpart primary 1536MiB 100%
 
     - name: Wait for partitions to appear
       command: udevadm settle
@@ -136,12 +136,7 @@
         --include=linux-image-generic,grub-pc,grub-efi-amd64,shim-signed,grub-efi-amd64-signed,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd,python3,python3-cffi-backend,openssh-server,parted
         {{ ubuntu_release }} {{ mount_root }} {{ mirror_url }}
 
-    # - name: Install required packages in chroot
-    #   shell: >
-    #   shell: >
-    #     chroot {{ mount_root }} /bin/bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y cloud-init cloud-guest-utils lvm2 sudo parted"
-
-    - name: Configure apt sources.list inside chroot
+      - name: Configure apt sources.list inside chroot
       copy:
         dest: "{{ mount_root }}/etc/apt/sources.list"
         content: |
@@ -154,6 +149,10 @@
         - command: mount --bind /dev {{ mount_root }}/dev
         - command: mount --bind /proc {{ mount_root }}/proc
         - command: mount --bind /sys {{ mount_root }}/sys
+
+    - name: Install required packages in chroot
+      shell: >
+        chroot {{ mount_root }} /bin/bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade"
 
     - name: Copy keyfile into image root
       copy:
