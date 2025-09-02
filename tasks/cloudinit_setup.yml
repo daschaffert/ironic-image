@@ -1,0 +1,57 @@
+- name: Install required packages in chroot
+  chroot:
+    path: "{{ mount_root }}"
+    cmd: >
+      apt-get update &&
+      DEBIAN_FRONTEND=noninteractive apt-get install -y
+      cloud-init cloud-guest-utils lvm2 sudo
+
+- name: Configure cloud-init datasource
+  copy:
+    dest: "{{ mount_root }}/etc/cloud/cloud.cfg.d/90_datasource.cfg"
+    content: |
+      datasource_list: [ NoCloud, None ]
+
+- name: Remove cloud-init disabled marker and old state
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ mount_root }}/etc/cloud/cloud-init.disabled"
+    - "{{ mount_root }}/var/lib/cloud"
+
+- name: Enable cloud-init systemd services
+  chroot:
+    path: "{{ mount_root }}"
+    cmd: >
+      systemctl enable cloud-init-local.service &&
+      systemctl enable cloud-init.service &&
+      systemctl enable cloud-config.service &&
+      systemctl enable cloud-final.service
+
+- name: Configure default user for cloud-init
+  copy:
+    dest: "{{ mount_root }}/etc/cloud/cloud.cfg.d/99_user.cfg"
+    content: |
+      users:
+        - name: {{ default_user }}
+          gecos: Ubuntu User
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          groups: users, admin
+          shell: /bin/bash
+          lock_passwd: false
+      ssh_pwauth: true
+
+# - name: Configure first-boot LV resizing
+#   copy:
+#     dest: "{{ mount_root }}/etc/cloud/cloud.cfg.d/99_lvm_resize.cfg"
+#     content: |
+#       growpart:
+#         mode: auto
+#         devices: ['/']
+#         ignore_growroot_disabled: false
+#       resize_rootfs: true
+#       runcmd:
+#       {% for lv in lvs_to_resize %}
+#         - lvresize -L {{ lv.size }} -r {{ lv.lv }}
+#       {% endfor %}

@@ -3,25 +3,26 @@
   become: true
   vars:
     image_file: /tmp/ubuntu.img
-    image_size: 12G
+    image_size: 10G
     loop_device: /dev/loop20
     keyfile_path: /root/crypt.key
     mount_root: /mnt/root
     ubuntu_release: jammy
+    default_user: ubuntu
     mirror_url: http://archive.ubuntu.com/ubuntu
     logical_volumes:
-      - { name: "root",    size: 3G }
-      - { name: "home",    size: 100M }
-      - { name: "var",     size: 600M }
-      - { name: "tmp",     size: 100M }
-      - { name: "docker",  size: 100M }
-      - { name: "log",     size: 100M }
-      - { name: "audit",   size: 100M }
-      - { name: "ceph",    size: 100M }
-      - { name: "kolla",   size: 100M }
-      - { name: "mariadb", size: 100M }
-      - { name: "swap",    size: 500M }
-    myhostname: ubuntu1
+      - { name: "root",    label: "root",           size: 3G,   final_size: 10G, mountpoint: "/" }
+      - { name: "home",    label: "home",           size: 100M, final_size: 5G, mountpoint: "/home" }
+      - { name: "var",     label: "var",            size: 2G,   final_size: 10G, mountpoint: "/var/" }
+      - { name: "tmp",     label: "var-tmp",        size: 1G,   final_size: 5G, mountpoint: "/var/tmp" }
+      - { name: "docker",  label: "var-lib-docker", size: 100M, final_size: 200G, mountpoint: "/var/lib/docker" }
+      - { name: "log",     label: "var-log",        size: 1G,   final_size: 20G, mountpoint: "/var/log" }
+      - { name: "audit",   label: "var-log-audit",  size: 100M, final_size: 1G, mountpoint: "/var/log/audit" }
+      - { name: "ceph",    label: "vol-ceph",       size: 100M, final_size: 10G, mountpoint: "/var/log/ceph" }
+      - { name: "kolla",   label: "vol-kolla_logs", size: 100M, final_size: 50G, mountpoint: "/var/lib/docker/volumes/kolla_logs" }
+      - { name: "mariadb", label: "vol-mariadb",    size: 100M, final_size: 100G, mountpoint: "/var/lib/docker/volumes/mariadb" }
+      - { name: "swap",    label: "swap",           size: 500M, final_size: 8G, mountpoint: "" }
+    myhostname: install-host
     autologin_consoles:
       - getty@tty1
       - serial-getty@ttyS0
@@ -57,10 +58,10 @@
       command: udevadm settle
 
     - name: Format efi partition
-      command: mkfs.vfat -F 32 {{ loop_device }}p2
+      command: mkfs.vfat -n esp -F 32 {{ loop_device }}p2
 
     - name: Format /boot partition
-      command: mkfs.ext4 {{ loop_device }}p3
+      command: mkfs.ext4 -L boot {{ loop_device }}p3
 
     - name: Create keyfile directory
       file:
@@ -84,7 +85,7 @@
         mode: '0400'
 
     - name: Format root partition with LUKS using keyfile
-      command: cryptsetup luksFormat {{ loop_device }}p4 {{ keyfile_path }} --batch-mode
+      command: cryptsetup luksFormat {{ loop_device }}p4 {{ keyfile_path }} --type luks2 --batch-mode
 
     - name: Open LUKS partition
       command: cryptsetup open {{ loop_device }}p4 cryptroot --key-file {{ keyfile_path }}
@@ -100,7 +101,7 @@
       loop: "{{ logical_volumes }}"
 
     - name: Format all LVs
-      command: mkfs.ext4 -L {{ item.name }} /dev/system/{{ item.name }}
+      command: mkfs.ext4 -L {{ item.label }} /dev/system/{{ item.name }}
       loop: "{{ logical_volumes }}"
       when: item.name != "swap"
 
@@ -108,7 +109,7 @@
       command: mkswap /dev/system/swap
   
     - name: Mount root LV
-      command: mount /dev/system/root {{ mount_root }}
+      command: mount /dev/system/root {{ mount_root }}      
 
     - name: Mount /boot
       command: >
@@ -118,12 +119,35 @@
       command: >
         bash -c "mkdir -p {{ mount_root }}/boot/efi &&mount {{ loop_device }}p2 {{ mount_root }}/boot/efi"
 
+    - name: Mount all logical volumes
+      mount:
+        path: "{{ mount_root }}/{{ item.mountpoint }}"
+        src: "/dev/system/{{ item.name }}"
+        fstype: ext4
+        state: mounted
+      loop: "{{ logical_volumes }}"
+      when: item.name != "swap" and item.name != "root"  
+
     - name: Bootstrap Ubuntu base system with kernel, grub, cryptsetup, lvm2, clevis and tpm2-tools
       command: >
         debootstrap
-        --components=main,universe
-        --include=linux-image-generic,grub-pc,grub-efi-amd64,shim-signed,grub-efi-amd64-signed,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd
+        --components=main,universe,multiverse
+        --cache-dir=/var/cache/debootstrap
+        --include=linux-image-generic,grub-pc,grub-efi-amd64,shim-signed,grub-efi-amd64-signed,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd,python3,python3-cffi-backend,openssh-server,parted
         {{ ubuntu_release }} {{ mount_root }} {{ mirror_url }}
+
+    # - name: Install required packages in chroot
+    #   shell: >
+    #   shell: >
+    #     chroot {{ mount_root }} /bin/bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y cloud-init cloud-guest-utils lvm2 sudo parted"
+
+    - name: Configure apt sources.list inside chroot
+      copy:
+        dest: "{{ mount_root }}/etc/apt/sources.list"
+        content: |
+          deb http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
+          deb http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
+          deb http://archive.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
 
     - name: Mount virtual filesystems for chroot
       block:
@@ -163,6 +187,22 @@
           /dev/mapper/system-swap none swap sw 0 0
           UUID={{ boot_uuid.stdout }} /boot ext4 defaults 0 2
           UUID={{ efi_uuid.stdout }} /boot/efi vfat defaults 0 2
+          #LABEL=root / ext4 rw,defaults 0 1
+          #LABEL=boot /boot ext4 defaults,noauto,x-systemd.automount 0 2
+          #LABEL=esp /boot/efi vfat defaults,noauto,x-systemd.automount 0 2
+          LABEL=home /home ext4 defaults 0 2
+          LABEL=var /var ext4 defaults 0 2
+          LABEL=var-tmp /var/tmp ext4 defaults,noauto,x-systemd.automount 0 2
+          LABEL=var-lib-docker /var/lib/docker ext4 defaults,noauto,x-systemd.growfs,x-systemd.automount 0 2
+          LABEL=var-log /var/log ext4 defaults,noauto,x-systemd.automount 0 2
+          LABEL=var-log-audit /var/log/audit ext4 defaults,noauto,x-systemd.automount 0 2
+
+          # extra volumes for docker container
+          LABEL=vol-ceph /var/log/ceph ext4 defaults,noauto,x-systemd.automount 0 2
+          LABEL=vol-kolla_logs /var/lib/docker/volumes/kolla_logs ext4 defaults,noauto,x-systemd.automount 0 2
+          LABEL=vol-mariadb /var/lib/docker/volumes/mariadb ext4 defaults,noauto,x-systemd.automount 0 2
+
+          tmpfs /tmp tmpfs defaults,mode=1777,strictatime,nosuid,nodev,size=50%,nr_inodes=1m 0 0
 
     - name: Set German keyboard layout in /etc/default/keyboard inside chroot
       copy:
@@ -253,7 +293,8 @@
           rm -f /root/setup-clevis-tpm.sh
           rm -f $KEYFILE
           sed -i s*\/root\/crypt.key*none*g /etc/crypttab
-          update-initramfs -k all -u    
+          update-initramfs -k all -u
+
 
     - name: Install systemd service to run clevis TPM setup script once
       copy:
@@ -277,6 +318,7 @@
       shell: chroot {{ mount_root }} systemctl enable clevis-tpm-setup.service
 
     - name: Setze Netplan-Konfiguration für DHCP auf eth0
+      ignore_errors: yes
       copy:
         dest: /mnt/root/etc/netplan/01-dhcp.yaml
         content: |
@@ -285,6 +327,24 @@
             ethernets:
               enp1s0:
                 dhcp4: true
+
+    - name: Get UUID of loop device
+      command: blkid -s UUID -o value {{ loop_device }}
+      register: base_dev_uuid
+
+    - name: Copy enlarge Volumes script for first boot
+      copy:
+        dest: "{{ mount_root }}/root/enlarge-volumes.sh"
+        mode: '0750'
+        content: |
+          #!/bin/bash
+          sgdisk -e /dev/vda
+          partprobe /dev/vda
+          parted /dev/vda resizepart 4 100%
+          cryptsetup resize /dev/mapper/cryptroot
+          {% for lv in logical_volumes %}
+          lvextend -r -L {{ lv.final_size }} /dev/vgname/{{ lv.name }}
+          {% endfor %}
 
     - name: Unmount virtual filesystems and cleanup
       ignore_errors: yes
@@ -296,7 +356,7 @@
             umount {{ mount_root }}/sys || true
             umount {{ mount_root }}/boot/efi || true
             umount {{ mount_root }}/boot
-            umount {{ mount_root }} || true
+            umount -R {{ mount_root }} || true
         - command: vgchange -an
         - command: cryptsetup close cryptroot
         - command: losetup -d {{ loop_device }}
