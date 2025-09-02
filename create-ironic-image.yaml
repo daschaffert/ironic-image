@@ -46,7 +46,7 @@
       command: parted -s {{ loop_device }} set 1 bios_grub on
 
     - name: Create /boot/efi partition (2MiB - 512MiB)
-      command: parted -s {{ loop_device }} mkpart esp fat32 2MiB 512MiB
+      command: parted -s {{ loop_device }} mkpart esp fat32 2MiB 512MiB set 2 boot on set 2 esp on
 
     - name: Create /boot partition (512MiB - 1536MiB)
       command: parted -s {{ loop_device }} mkpart primary ext4 512MiB 1536MiB
@@ -150,9 +150,17 @@
         - command: mount --bind /proc {{ mount_root }}/proc
         - command: mount --bind /sys {{ mount_root }}/sys
 
-    - name: Install required packages in chroot
-      shell: >
-        chroot {{ mount_root }} /bin/bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade"
+    - name: Update package lists inside chroot
+      command: chroot {{ mount_root }} apt-get update
+
+    - name: Upgrade all packages to latest inside chroot
+      command: chroot {{ mount_root }} apt-get -y full-upgrade
+
+    # - name: Install latest HWE kernel inside chroot
+    #   command: chroot {{ mount_root }} apt-get -y install --install-recommends linux-generic-hwe-22.04
+
+    - name: Clean up apt cache inside chroot
+      command: chroot {{ mount_root }} apt-get clean
 
     - name: Copy keyfile into image root
       copy:
