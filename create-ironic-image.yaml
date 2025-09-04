@@ -140,6 +140,7 @@
       command: >
         debootstrap
         --components=main,universe,multiverse
+        --arch=amd64
         --cache-dir=/var/cache/debootstrap
         --include=linux-image-generic,grub-pc,grub-efi-amd64,shim-signed,grub-efi-amd64-signed,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd,python3,python3-cffi-backend,openssh-server,parted,gdisk
         {{ ubuntu_release }} {{ mount_root }} {{ mirror_url }}
