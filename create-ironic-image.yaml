@@ -26,6 +26,8 @@
     autologin_consoles:
       - getty@tty1
       - serial-getty@ttyS0
+  vars_files:
+    - vars/packages.yml
 
   tasks:
     - name: Create image file
@@ -48,7 +50,13 @@
     #   command: parted -s {{ loop_device }} set 1 bios_grub on
 
     - name: Create /boot/efi partition
-      command: parted -s {{ loop_device }} mkpart esp fat32 1MiB 1024MiB
+      command: parted -s {{ loop_device }} mkpart OSISM_HV_EFI_PARTITION fat32 1MiB 1024MiB
+
+    - name: Create /boot partition (512MiB - 1536MiB)
+      command: parted -s {{ loop_device }} mkpart OSISM_HV_BOOT_PARTITION ext4 1024MiB 2048MiB
+
+    - name: Create root partition (1536MiB - 100%)
+      command: parted -s {{ loop_device }} mkpart OSISM_HV_LVM_PARTITION ext4 2048MiB 100%
 
     - name: Set boot flag on EFI partition
       command: parted -s {{ loop_device }} set 1 boot on
@@ -56,11 +64,11 @@
     - name: Set esp flag on EFI partition
       command: parted -s {{ loop_device }} set 1 esp on
 
-    - name: Create /boot partition (512MiB - 1536MiB)
-      command: parted -s {{ loop_device }} mkpart primary ext4 1024MiB 2048MiB
+    - name: Set legacy_boot flag on BOOT partition
+      command: parted -s {{ loop_device }} set 2 legacy_boot on
 
-    - name: Create root partition (1536MiB - 100%)
-      command: parted -s {{ loop_device }} mkpart primary ext4 2048MiB 100%
+    - name: Set lvm flag on root partition
+      command: parted -s {{ loop_device }} set 3 lvm on
 
     - name: Wait for partitions to appear
       command: udevadm settle
@@ -136,13 +144,16 @@
       loop: "{{ logical_volumes }}"
       when: item.name != "swap" and item.name != "root"  
 
+
+# old command: # --include=linux-image-generic,grub-pc,grub-efi-amd64,shim-signed,grub-efi-amd64-signed,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd,python3,python3-cffi-backend,openssh-server,parted,gdisk
+
     - name: Bootstrap Ubuntu base system with kernel, grub, cryptsetup, lvm2, clevis and tpm2-tools
       command: >
         debootstrap
         --components=main,universe,multiverse
         --arch=amd64
         --cache-dir=/var/cache/debootstrap
-        --include=linux-image-generic,grub-pc,grub-efi-amd64,shim-signed,grub-efi-amd64-signed,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd,python3,python3-cffi-backend,openssh-server,parted,gdisk
+        --include=linux-image-generic,dracut,cryptsetup,lvm2,clevis,clevis-dracut,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd,python3,python3-cffi-backend,openssh-server,binutils,parted,gdisk
         {{ ubuntu_release }} {{ mount_root }} {{ mirror_url }}
 
     - name: Configure apt sources.list inside chroot
@@ -165,8 +176,10 @@
     - name: Upgrade all packages to latest inside chroot
       command: chroot {{ mount_root }} apt-get -y full-upgrade
 
-    # - name: Install latest HWE kernel inside chroot
-    #   command: chroot {{ mount_root }} apt-get -y install --install-recommends linux-generic-hwe-22.04
+    - name: Install required packages inside chroot
+      command: >
+        chroot {{ mount_root }}
+        apt-get -y install --install-recommends {{ packages | join(' ') }}
 
     - name: Clean up apt cache inside chroot
       command: chroot {{ mount_root }} apt-get clean
@@ -283,23 +296,34 @@
 
     # - name: Setup grub and update initramfs in chroot
     #   shell: |
-    #     chroot {{ mount_root }} /bin/bash -c "echo 'root:root' | chpasswd && \
+    #     chroot {{ mount_root }} /bin/bash -c "\
+    #       echo 'root:root' | chpasswd && \
     #       echo 'GRUB_ENABLE_CRYPTODISK=y' >> /etc/default/grub && \
-    #       echo 'KEYFILE_PATTERN=/root/crypt.key' > /etc/cryptsetup-initramfs/conf-hook
+    #       echo 'KEYFILE_PATTERN=/root/crypt.key' > /etc/cryptsetup-initramfs/conf-hook && \
     #       update-initramfs -u && \
-    #       grub-install --target=i386-pc --boot-directory=/boot {{ loop_device }} && \
-    #       grub-install --target=x86_64-efi --efi-directory=/boot/efi --boot-directory=/boot --removable
+    #       grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --recheck && \
     #       update-grub"
 
-    - name: Setup grub and update initramfs in chroot
+    - name: Configure base system packages
+      command: chroot {{ mount_root }} dpkg --configure -a
+
+    - name: Setup systemd-boot bootctl
+      shell: |
+        chroot {{ mount_root }} /bin/bash -c "\
+          bootctl install"
+      ignore_errors: true
+
+    - name: UCreate UKI UEFI boot image in chroot
+      vars:
+        kversion: "{{ lookup('pipe', 'ls ' ~ mount_root ~ '/lib/modules | sort | tail -n1') }}"
       shell: |
         chroot {{ mount_root }} /bin/bash -c "\
           echo 'root:root' | chpasswd && \
-          echo 'GRUB_ENABLE_CRYPTODISK=y' >> /etc/default/grub && \
-          echo 'KEYFILE_PATTERN=/root/crypt.key' > /etc/cryptsetup-initramfs/conf-hook && \
-          update-initramfs -u && \
-          grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --recheck && \
-          update-grub"
+          dracut --uefi --add clevis --add crypt --add lvm \
+                --add-drivers 'virtio_pci virtio_net virtio_blk virtio_scsi ahci dm_mod' \
+                --include /root/crypt.key /root/crypt.key \
+                --kver {{ kversion }} --force"
+
 
     - name: Copy enlarge Volumes script for first boot
       copy:
@@ -307,9 +331,9 @@
         mode: '0750'
         content: |
           #!/bin/bash
-          sgdisk -e /dev/vda
-          partprobe /dev/vda
-          parted /dev/vda resizepart 3 100%
+          sgdisk -e /dev/sda
+          partprobe /dev/sda
+          parted /dev/sda resizepart 3 100%
           cryptsetup resize /dev/mapper/cryptroot -d /root/crypt.key
           pvresize /dev/mapper/cryptroot
           {% for lv in logical_volumes %}
@@ -377,7 +401,7 @@
     - name: Enable clevis TPM setup systemd service
       shell: chroot {{ mount_root }} systemctl enable clevis-tpm-setup.service
 
-    - name: Setze Netplan-Konfiguration für DHCP auf eth0
+    - name: Initial Netplan Configuration
       ignore_errors: yes
       copy:
         dest: /mnt/root/etc/netplan/01-dhcp.yaml
