@@ -403,16 +403,16 @@
     - name: Enable clevis TPM setup systemd service
       shell: chroot {{ mount_root }} systemctl enable clevis-tpm-setup.service
 
-    - name: Initial Netplan Configuration
-      ignore_errors: yes
-      copy:
-        dest: /mnt/root/etc/netplan/01-dhcp.yaml
-        content: |
-          network:
-            version: 2
-            ethernets:
-              enp1s0:
-                dhcp4: true
+    # - name: Initial Netplan Configuration
+    #   ignore_errors: yes
+    #   copy:
+    #     dest: /mnt/root/etc/netplan/01-dhcp.yaml
+    #     content: |
+    #       network:
+    #         version: 2
+    #         ethernets:
+    #           enp1s0:
+    #             dhcp4: true
 
     - name: Get UUID of loop device
       command: blkid -s UUID -o value {{ loop_device }}
