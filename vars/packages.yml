@@ -1,4 +1,5 @@
 packages:
+  - linux-image-generic
   - bash
   - bash-completion
   - binutils

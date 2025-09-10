@@ -142,10 +142,12 @@
         fstype: ext4
         state: mounted
       loop: "{{ logical_volumes }}"
-      when: item.name != "swap" and item.name != "root"  
+      when: item.name != "swap" and item.name != "root"
 
-
-# old command: # --include=linux-image-generic,grub-pc,grub-efi-amd64,shim-signed,grub-efi-amd64-signed,cryptsetup,cryptsetup-initramfs,initramfs-tools,lvm2,clevis,clevis-initramfs,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd,python3,python3-cffi-backend,openssh-server,parted,gdisk
+    - name: Copy directory recursively
+      copy:
+        src: copydir/
+        dest: "{{ mount_root }}/"
 
     - name: Bootstrap Ubuntu base system with kernel, grub, cryptsetup, lvm2, clevis and tpm2-tools
       command: >
