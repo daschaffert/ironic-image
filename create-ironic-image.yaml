@@ -137,7 +137,7 @@
 
     - name: Mount all logical volumes
       mount:
-        path: "{{ mount_root }}/{{ item.mountpoint }}"
+        path: "{{ mount_root }}{{ item.mountpoint }}"
         src: "/dev/system/{{ item.name }}"
         fstype: ext4
         state: mounted
@@ -155,7 +155,7 @@
         --components=main,universe,multiverse
         --arch=amd64
         --cache-dir=/var/cache/debootstrap
-        --include=linux-image-generic,dracut,cryptsetup,lvm2,clevis,clevis-dracut,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd,python3,python3-cffi-backend,openssh-server,binutils,parted,gdisk
+        --include=linux-image-generic-hwe-22.04,dracut,cryptsetup,lvm2,clevis,clevis-dracut,clevis-luks,clevis-tpm2,tpm2-tools,vim,bash-completion,passwd,python3,python3-cffi-backend,openssh-server,binutils,parted,gdisk
         {{ ubuntu_release }} {{ mount_root }} {{ mirror_url }}
 
     - name: Configure apt sources.list inside chroot
@@ -214,26 +214,25 @@
       copy:
         dest: "{{ mount_root }}/etc/fstab"
         content: |
-          /dev/mapper/system-root / ext4 defaults 0 1
-          /dev/mapper/system-swap none swap sw 0 0
-          UUID={{ boot_uuid.stdout }} /boot ext4 defaults 0 2
-          UUID={{ efi_uuid.stdout }} /boot/efi vfat defaults 0 2
-          #LABEL=root / ext4 rw,defaults 0 1
-          #LABEL=boot /boot ext4 defaults,noauto,x-systemd.automount 0 2
-          #LABEL=esp /boot/efi vfat defaults,noauto,x-systemd.automount 0 2
-          LABEL=home /home ext4 defaults 0 2
-          LABEL=var /var ext4 defaults 0 2
-          LABEL=var-tmp /var/tmp ext4 defaults,noauto,x-systemd.automount 0 2
+          LABEL=root / ext4 rw,defaults 0 1
+          LABEL=boot /boot ext4 defaults,noauto,x-systemd.automount 0 2
+          LABEL=esp /boot/efi vfat defaults,noauto,x-systemd.automount 0 2
+          LABEL=home /home ext4 defaults,nodev,nosuid 0 2 
+          LABEL=var /var ext4 defaults,nodev,nosuid
+          LABEL=var-tmp /var/tmp ext4 defaults,nodev,nosuid,noexec,x-systemd.automount 0 2
           LABEL=var-lib-docker /var/lib/docker ext4 defaults,noauto,x-systemd.growfs,x-systemd.automount 0 2
-          LABEL=var-log /var/log ext4 defaults,noauto,x-systemd.automount 0 2
-          LABEL=var-log-audit /var/log/audit ext4 defaults,noauto,x-systemd.automount 0 2
+          LABEL=var-log /var/log ext4 defaults,nodev,nosuid,noexec,x-systemd.automount 0 2
+          LABEL=var-log-audit /var/log/audit ext4 defaults,nodev,nosuid,noexec,x-systemd.automount 0 2
 
           # extra volumes for docker container
           LABEL=vol-ceph /var/log/ceph ext4 defaults,noauto,x-systemd.automount 0 2
           LABEL=vol-kolla_logs /var/lib/docker/volumes/kolla_logs ext4 defaults,noauto,x-systemd.automount 0 2
           LABEL=vol-mariadb /var/lib/docker/volumes/mariadb ext4 defaults,noauto,x-systemd.automount 0 2
 
-          tmpfs /tmp tmpfs defaults,mode=1777,strictatime,nosuid,nodev,size=50%,nr_inodes=1m 0 0
+          /dev/mapper/system-swap none swap sw 0 0
+
+          tmpfs /tmp tmpfs rw,nosuid,nodev,noexec 0 0
+          #tmpfs /tmp tmpfs defaults,mode=1777,strictatime,nosuid,nodev,size=50%,nr_inodes=1m 0 0
 
     - name: Set German keyboard layout in /etc/default/keyboard inside chroot
       copy:
@@ -309,13 +308,20 @@
     - name: Configure base system packages
       command: chroot {{ mount_root }} dpkg --configure -a
 
+    - name: Set default systemd target in chroot image
+      file:
+        src: "/usr/lib/systemd/system/multi-user.target"
+        dest: "{{ mount_root }}/etc/systemd/system/default.target"
+        state: link
+        force: true
+
     - name: Setup systemd-boot bootctl
       shell: |
         chroot {{ mount_root }} /bin/bash -c "\
           bootctl install"
       ignore_errors: true
 
-    - name: UCreate UKI UEFI boot image in chroot
+    - name: Create UKI UEFI boot image in chroot
       vars:
         kversion: "{{ lookup('pipe', 'ls ' ~ mount_root ~ '/lib/modules | sort | tail -n1') }}"
       shell: |
@@ -338,10 +344,9 @@
           parted /dev/sda resizepart 3 100%
           cryptsetup resize /dev/mapper/cryptroot -d /root/crypt.key
           pvresize /dev/mapper/cryptroot
-          {% for lv in logical_volumes %}
+          {% for lv in logical_volumes if lv.name != 'swap' %}
           lvextend -r -L {{ lv.final_size }} /dev/system/{{ lv.name }}
           {% endfor %}
-
 
     - name: Copy TPM binding script for first boot
       copy:
@@ -361,7 +366,8 @@
           rm -f /root/setup-clevis-tpm.sh
           rm -f $KEYFILE
           sed -i s*\/root\/crypt.key*none*g /etc/crypttab
-          update-initramfs -k all -u
+          dracut --uefi --force
+          systemd-cryptenroll --wipe-slot=0 /dev/disk/by-uuid/"{{ crypto_uuid.stdout }}"
 
     - name: Install systemd service to run enlarge volumes setup script once
       copy:
@@ -374,8 +380,8 @@
           [Service]
           Type=oneshot
           ExecStart=/root/enlarge-volumes.sh
-          ExecStartPost=/bin/systemctl disable enlarge-volumes-setup.service
-          RemainAfterExit=no
+          ExecStartPost=/bin/sh -c 'systemctl disable --now enlarge-volumes-setup.service'
+          RemainAfterExit=yes
 
           [Install]
           WantedBy=multi-user.target
@@ -394,8 +400,8 @@
           [Service]
           Type=oneshot
           ExecStart=/root/setup-clevis-tpm.sh
-          ExecStartPost=/bin/systemctl disable clevis-tpm-setup.service
-          RemainAfterExit=no
+          ExecStartPost=/bin/sh -c 'systemctl disable --now clevis-tpm-setup.service'
+          RemainAfterExit=yes
 
           [Install]
           WantedBy=multi-user.target
@@ -403,20 +409,8 @@
     - name: Enable clevis TPM setup systemd service
       shell: chroot {{ mount_root }} systemctl enable clevis-tpm-setup.service
 
-    # - name: Initial Netplan Configuration
-    #   ignore_errors: yes
-    #   copy:
-    #     dest: /mnt/root/etc/netplan/01-dhcp.yaml
-    #     content: |
-    #       network:
-    #         version: 2
-    #         ethernets:
-    #           enp1s0:
-    #             dhcp4: true
-
-    - name: Get UUID of loop device
-      command: blkid -s UUID -o value {{ loop_device }}
-      register: base_dev_uuid
+# Import the Hardening Task
+    - import_tasks: tasks/hardening.yml
 
     - name: Unmount virtual filesystems and cleanup
       ignore_errors: yes
@@ -432,3 +426,12 @@
         - command: vgchange -an
         - command: cryptsetup close cryptroot
         - command: losetup -d {{ loop_device }}
+
+    - name: Umount all logical volumes
+      mount:
+        path: "{{ mount_root }}{{ item.mountpoint }}"
+        src: "/dev/system/{{ item.name }}"
+        fstype: ext4
+        state: absent
+      loop: "{{ logical_volumes }}"
+      when: item.name != "swap" and item.name != "root"

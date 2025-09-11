@@ -1,0 +1,75 @@
+- name: Install required packages for hardening
+  shell: |
+    chroot {{ mount_root }} /bin/bash -c "DEBIAN_FRONTEND=noninteractive apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y auditd apparmor apparmor-utils apt-listchanges \
+    apt-show-versions needrestart fail2ban libpam-tmpdir chkrootkit debsums aide usbguard"
+
+
+- name: Set sticky Bit on /var/tmp
+  command: >
+    chroot {{ mount_root }}
+    chmod +t /var/tmp
+
+- name: Remove gnu assembler
+  command: >
+    chroot {{ mount_root }}
+    rm /usr/bin/as /usr/bin/x86_64-linux-gnu-as
+
+- name: Set file permissions inside chroot
+  shell: |
+    chroot {{ mount_root }} /bin/bash -c "
+      chmod 600 /boot/grub/grub.cfg &&
+      chmod 600 /etc/crontab &&
+      chmod 600 /etc/ssh/sshd_config &&
+      chmod 700 /etc/cron.*"
+
+# sysctl Kernel Settings:
+- name: Copy TPM binding script for first boot
+  copy:
+    dest: "{{ mount_root }}/etc/sysctl.d/99-cis.conf"
+    mode: '0750'
+    content: |
+      # dev.tty.ldisc_autoload = 0                    
+      # fs.protected_fifos = 2                        
+      # fs.protected_hardlinks = 1                    
+      # fs.protected_regular = 2                      
+      # fs.protected_symlinks = 1                     
+      # fs.suid_dumpable = 0                          
+      # kernel.core_uses_pid = 1                      
+      # kernel.ctrl-alt-del = 0                       
+      # kernel.dmesg_restrict = 1                     
+      # kernel.kptr_restrict = 2                      
+      # kernel.modules_disabled = 1                   
+      # kernel.perf_event_paranoid = 3                
+      # kernel.randomize_va_space = 2                 
+      # kernel.sysrq = 0                              
+      # kernel.unprivileged_bpf_disabled = 1          
+      # kernel.yama.ptrace_scope = 1            
+      # net.core.bpf_jit_harden = 2                   
+      net.ipv4.conf.all.accept_redirects = 0        
+      net.ipv4.conf.all.accept_source_route = 0     
+      net.ipv4.conf.all.bootp_relay = 0             
+      net.ipv4.conf.all.forwarding = 0              
+      net.ipv4.conf.all.log_martians = 1            
+      net.ipv4.conf.all.mc_forwarding = 0           
+      net.ipv4.conf.all.proxy_arp = 0               
+      net.ipv4.conf.all.rp_filter = 1               
+      net.ipv4.conf.all.send_redirects = 0          
+      net.ipv4.conf.default.accept_redirects = 0    
+      net.ipv4.conf.default.accept_source_route = 0 
+      net.ipv4.conf.default.log_martians = 1        
+      net.ipv4.icmp_echo_ignore_broadcasts = 1      
+      net.ipv4.icmp_ignore_bogus_error_responses = 1
+      net.ipv4.tcp_syncookies = 1                   
+      net.ipv4.tcp_timestamps = 0              
+      net.ipv6.conf.all.accept_redirects = 0        
+      net.ipv6.conf.all.accept_source_route = 0     
+      net.ipv6.conf.default.accept_redirects = 0    
+      net.ipv6.conf.default.accept_source_route = 0 
+
+#Initialize AIDE
+- name: Initialize AIDE and AIDE-DB
+  shell: |
+    chroot {{ mount_root }} /bin/bash -c "
+    aideinit
+    mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db"
